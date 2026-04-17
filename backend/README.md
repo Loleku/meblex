@@ -56,22 +56,88 @@ Success response:
 ```json
 {
   "success": true,
-  "mesh": {
-    "vertices": [[x, y, z], [x, y, z]],
-    "triangles": [[i, j, k], [i, j, k]],
-    "bounds": [min_x, min_y, min_z, max_x, max_y, max_z]
+  "geometry": {
+    "vertices": [x1, y1, z1, x2, y2, z2],
+    "normals": [nx1, ny1, nz1, nx2, ny2, nz2],
+    "indices": [i0, i1, i2, i3, i4, i5]
   },
+  "parts_metadata": [
+    {
+      "part_id": "part_0",
+      "name": "root",
+      "bounds": [min_x, min_y, min_z, max_x, max_y, max_z],
+      "vertex_count": 1000,
+      "triangle_count": 2000,
+      "index_start": 0,
+      "index_count": 6000
+    }
+  ],
   "stats": {
     "filename": "model.step",
     "file_size_bytes": 12345,
     "vertex_count": 1000,
     "triangle_count": 2000,
-    "tolerance": 0.01
-  }
+    "tolerance": 0.01,
+    "part_count": 1
+  },
 }
 ```
 
 On processing failure, API returns HTTP 500 with fail-fast error details.
+
+### POST `/api/step/upload` (Stage 1 async flow)
+
+Starts background processing and returns a `job_id`.
+
+Response (`202 Accepted`):
+
+```json
+{
+  "success": true,
+  "job_id": "uuid",
+  "status": "queued",
+  "status_url": "/api/step/upload/{job_id}",
+  "events_url": "/api/step/upload/{job_id}/events"
+}
+```
+
+### GET `/api/step/upload/{job_id}`
+
+Returns job status (`queued`, `processing`, `completed`, `failed`) and progress.
+When completed, response includes final triangulated payload in `result`.
+
+### GET `/api/step/upload/{job_id}/events`
+
+Server-Sent Events (SSE) stream for real-time progress updates.
+
+Events:
+- `queued`
+- `progress`
+- `completed` (includes final `result`)
+- `failed` (includes `error`)
+
+Example frontend usage:
+
+```ts
+const source = new EventSource(`${API_URL}/api/step/upload/${jobId}/events`);
+
+source.addEventListener("progress", (event) => {
+  const payload = JSON.parse((event as MessageEvent).data);
+  console.log(payload.progress);
+});
+
+source.addEventListener("completed", (event) => {
+  const payload = JSON.parse((event as MessageEvent).data);
+  console.log(payload.result.geometry);
+  source.close();
+});
+
+source.addEventListener("failed", (event) => {
+  const payload = JSON.parse((event as MessageEvent).data);
+  console.error(payload.error);
+  source.close();
+});
+```
 
 ## Smoke test script
 

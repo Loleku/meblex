@@ -13,11 +13,37 @@ import numpy as np
 MeshResult = Dict[str, Any]
 
 
+def _compute_vertex_normals(vertices_array: np.ndarray, triangles_array: np.ndarray) -> np.ndarray:
+    normals = np.zeros_like(vertices_array, dtype=np.float32)
+
+    for tri in triangles_array:
+        i0, i1, i2 = int(tri[0]), int(tri[1]), int(tri[2])
+        v0 = vertices_array[i0]
+        v1 = vertices_array[i1]
+        v2 = vertices_array[i2]
+
+        edge1 = v1 - v0
+        edge2 = v2 - v0
+        face_normal = np.cross(edge1, edge2)
+
+        normals[i0] += face_normal
+        normals[i1] += face_normal
+        normals[i2] += face_normal
+
+    lengths = np.linalg.norm(normals, axis=1, keepdims=True)
+    lengths[lengths == 0] = 1.0
+    normals = normals / lengths
+    return normals.astype(np.float32)
+
+
 def _build_mesh_result(vertices: List[List[float]], triangles: List[List[int]]) -> MeshResult:
     if not vertices or not triangles:
         raise RuntimeError("Meshing succeeded but produced empty geometry.")
 
     vertices_array = np.array(vertices, dtype=np.float32)
+    triangles_array = np.array(triangles, dtype=np.int32)
+    normals_array = _compute_vertex_normals(vertices_array, triangles_array)
+
     bounds = [
         float(vertices_array[:, 0].min()),
         float(vertices_array[:, 1].min()),
@@ -27,7 +53,23 @@ def _build_mesh_result(vertices: List[List[float]], triangles: List[List[int]]) 
         float(vertices_array[:, 2].max()),
     ]
 
+    part_metadata = {
+        "part_id": "part_0",
+        "name": "root",
+        "bounds": bounds,
+        "vertex_count": len(vertices),
+        "triangle_count": len(triangles),
+        "index_start": 0,
+        "index_count": len(triangles) * 3,
+    }
+
     return {
+        "geometry": {
+            "vertices": vertices_array.reshape(-1).astype(np.float32).tolist(),
+            "normals": normals_array.reshape(-1).astype(np.float32).tolist(),
+            "indices": triangles_array.reshape(-1).astype(np.int32).tolist(),
+        },
+        "parts_metadata": [part_metadata],
         "vertices": vertices,
         "triangles": triangles,
         "bounds": bounds,

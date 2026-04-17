@@ -5,37 +5,67 @@ import { Canvas } from "@react-three/fiber";
 import { Bounds, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 
-type MeshData = {
-  vertices: number[][];
-  triangles: number[][];
+type GeometryData = {
+  vertices: number[];
+  normals: number[];
+  indices: number[];
+};
+
+type PartMetadata = {
+  part_id: string;
+  name: string;
   bounds: [number, number, number, number, number, number];
+  vertex_count: number;
+  triangle_count: number;
+  index_start: number;
+  index_count: number;
 };
 
 type UploadResponse = {
   success: boolean;
-  mesh: MeshData;
+  geometry: GeometryData;
+  parts_metadata: PartMetadata[];
   stats: {
     filename: string;
     file_size_bytes: number;
     vertex_count: number;
     triangle_count: number;
     tolerance: number;
+    part_count: number;
   };
+};
+
+type AsyncUploadResponse = {
+  success: boolean;
+  job_id: string;
+  status: "queued";
+  status_url: string;
+  events_url: string;
+};
+
+type JobEventPayload = {
+  success: boolean;
+  job_id: string;
+  filename: string;
+  status: "queued" | "processing" | "completed" | "failed";
+  progress: number;
+  error?: string;
+  result?: UploadResponse;
 };
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8002";
 
-function ModelMesh({ mesh }: { mesh: MeshData }) {
-  const geometry = useMemo(() => {
+function ModelMesh({ geometry }: { geometry: GeometryData }) {
+  const meshGeometry = useMemo(() => {
     const g = new THREE.BufferGeometry();
 
-    const positions = new Float32Array(mesh.vertices.flat());
-    const indexValues = mesh.triangles.flat();
-    const indices = new Uint32Array(indexValues);
+    const positions = new Float32Array(geometry.vertices);
+    const normals = new Float32Array(geometry.normals);
+    const indices = new Uint32Array(geometry.indices);
 
     g.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    g.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
     g.setIndex(new THREE.BufferAttribute(indices, 1));
-    g.computeVertexNormals();
 
     g.computeBoundingBox();
     const box = g.boundingBox;
@@ -53,10 +83,10 @@ function ModelMesh({ mesh }: { mesh: MeshData }) {
     g.computeBoundingSphere();
 
     return g;
-  }, [mesh]);
+  }, [geometry]);
 
   return (
-    <mesh geometry={geometry} castShadow receiveShadow>
+    <mesh geometry={meshGeometry} castShadow receiveShadow>
       <meshStandardMaterial color="#5f8f7a" metalness={0.2} roughness={0.65} />
     </mesh>
   );
@@ -64,11 +94,14 @@ function ModelMesh({ mesh }: { mesh: MeshData }) {
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
-  const [meshData, setMeshData] = useState<MeshData | null>(null);
+  const [geometryData, setGeometryData] = useState<GeometryData | null>(null);
+  const [partsMetadata, setPartsMetadata] = useState<PartMetadata[]>([]);
   const [stats, setStats] = useState<UploadResponse["stats"] | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tolerance, setTolerance] = useState(0.01);
+  const [jobStatus, setJobStatus] = useState<string | null>(null);
+  const [progress, setProgress] = useState(0);
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -80,20 +113,25 @@ export default function Home() {
 
     setIsLoading(true);
     setError(null);
+    setProgress(0);
+    setJobStatus("queued");
+    setGeometryData(null);
+    setPartsMetadata([]);
+    setStats(null);
 
     try {
       const formData = new FormData();
       formData.append("file", file);
 
       const params = new URLSearchParams({ tolerance: tolerance.toString() });
-      const response = await fetch(`${API_URL}/api/upload-step?${params.toString()}`, {
+      const response = await fetch(`${API_URL}/api/step/upload?${params.toString()}`, {
         method: "POST",
         body: formData,
       });
 
-      const payload = (await response.json()) as UploadResponse | { detail?: string };
+      const payload = (await response.json()) as AsyncUploadResponse | { detail?: string };
 
-      if (!response.ok || !("success" in payload) || !payload.success) {
+      if (!response.ok || !("success" in payload) || !payload.success || !("job_id" in payload)) {
         const message =
           "detail" in payload && payload.detail
             ? payload.detail
@@ -101,13 +139,48 @@ export default function Home() {
         throw new Error(message);
       }
 
-      setMeshData(payload.mesh);
-      setStats(payload.stats);
+      setJobStatus("processing");
+
+      const eventsUrl = payload.events_url.startsWith("http")
+        ? payload.events_url
+        : `${API_URL}${payload.events_url}`;
+      const source = new EventSource(eventsUrl);
+
+      const handleEvent = (event: MessageEvent<string>) => {
+        const eventPayload = JSON.parse(event.data) as JobEventPayload;
+        setJobStatus(eventPayload.status);
+        setProgress(eventPayload.progress);
+
+        if (eventPayload.status === "completed" && eventPayload.result) {
+          setGeometryData(eventPayload.result.geometry);
+          setPartsMetadata(eventPayload.result.parts_metadata ?? []);
+          setStats(eventPayload.result.stats);
+          setIsLoading(false);
+          source.close();
+        }
+
+        if (eventPayload.status === "failed") {
+          setError(eventPayload.error ?? "Przetwarzanie zakonczone bledem.");
+          setIsLoading(false);
+          source.close();
+        }
+      };
+
+      source.addEventListener("queued", handleEvent as EventListener);
+      source.addEventListener("progress", handleEvent as EventListener);
+      source.addEventListener("completed", handleEvent as EventListener);
+      source.addEventListener("failed", handleEvent as EventListener);
+
+      source.onerror = () => {
+        setError("Polaczenie SSE zostalo przerwane.");
+        setIsLoading(false);
+        source.close();
+      };
     } catch (err) {
-      setMeshData(null);
+      setGeometryData(null);
+      setPartsMetadata([]);
       setStats(null);
       setError(err instanceof Error ? err.message : "Wystapil nieznany blad.");
-    } finally {
       setIsLoading(false);
     }
   };
@@ -173,6 +246,20 @@ export default function Home() {
 
           {error ? <p className="mt-3 text-sm text-red-700">{error}</p> : null}
 
+          {isLoading ? (
+            <div className="mt-3 rounded-lg border border-[#c9d2cd] bg-[#f2f7f4] p-3 text-sm text-[#2f3b35]">
+              <p>
+                Status: {jobStatus ?? "processing"} ({progress}%)
+              </p>
+              <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-[#d6e0db]">
+                <div
+                  className="h-full rounded-full bg-[#2a6f55] transition-all"
+                  style={{ width: `${progress}%` }}
+                />
+              </div>
+            </div>
+          ) : null}
+
           {stats ? (
             <div className="mt-4 grid gap-2 text-sm text-[#3f4a45] sm:grid-cols-2 lg:grid-cols-4">
               <p>Plik: {stats.filename}</p>
@@ -180,6 +267,17 @@ export default function Home() {
               <p>Trojkaty: {stats.triangle_count}</p>
               <p>Rozmiar: {(stats.file_size_bytes / 1024).toFixed(1)} KB</p>
               <p>Tolerance: {stats.tolerance.toFixed(3)}</p>
+              <p>Czesci: {stats.part_count}</p>
+            </div>
+          ) : null}
+
+          {partsMetadata.length > 0 ? (
+            <div className="mt-3 rounded-lg border border-[#c9d2cd] bg-[#f6f9f7] p-3 text-xs text-[#4a5751]">
+              {partsMetadata.map((part) => (
+                <p key={part.part_id}>
+                  {part.name}: {part.vertex_count} v / {part.triangle_count} t
+                </p>
+              ))}
             </div>
           ) : null}
         </section>
@@ -197,9 +295,9 @@ export default function Home() {
             />
             <gridHelper args={[10, 20, "#9aa9a1", "#cad4cf"]} />
 
-            {meshData ? (
+            {geometryData ? (
               <Bounds fit clip observe margin={1.25}>
-                <ModelMesh mesh={meshData} />
+                <ModelMesh geometry={geometryData} />
               </Bounds>
             ) : (
               <mesh position={[0, 0.5, 0]} castShadow receiveShadow>

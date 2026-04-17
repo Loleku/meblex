@@ -38,6 +38,27 @@ curl -X POST "http://localhost:8002/api/upload-step?tolerance=0.02" \
   -F "file=@your_model.step"
 ```
 
+### 4b) Stage 1 async endpoint
+
+Start job:
+
+```bash
+curl -X POST "http://localhost:8002/api/step/upload?tolerance=0.02" \
+  -F "file=@your_model.step"
+```
+
+Check status:
+
+```bash
+curl "http://localhost:8002/api/step/upload/<job_id>"
+```
+
+SSE progress stream:
+
+```bash
+curl -N "http://localhost:8002/api/step/upload/<job_id>/events"
+```
+
 ### 5) Optional smoke test
 
 ```bash
