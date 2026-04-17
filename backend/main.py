@@ -5,10 +5,10 @@ from pathlib import Path
 app_dir = Path(__file__).parent / "app"
 sys.path.insert(0, str(app_dir))
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from mesh_processor import process_step_to_mesh
+from app.mesh_processor import process_step_to_mesh
 
 app = FastAPI(title="STEP to Mesh API")
 
@@ -28,7 +28,10 @@ async def root():
 
 
 @app.post("/api/upload-step")
-async def upload_step_file(file: UploadFile = File(...)):
+async def upload_step_file(
+    file: UploadFile = File(...),
+    tolerance: float = Query(0.01, ge=0.001, le=1.0),
+):
     """
     Upload and process a STEP file.
     
@@ -56,7 +59,7 @@ async def upload_step_file(file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail="File is empty")
         
         # Process the STEP file
-        mesh_data = process_step_to_mesh(content, tolerance=0.01)
+        mesh_data = process_step_to_mesh(content, tolerance=tolerance)
         
         # Prepare response
         response = {
@@ -71,6 +74,7 @@ async def upload_step_file(file: UploadFile = File(...)):
                 "file_size_bytes": len(content),
                 "vertex_count": mesh_data["vertex_count"],
                 "triangle_count": mesh_data["triangle_count"],
+                "tolerance": tolerance,
             }
         }
         
@@ -86,4 +90,4 @@ async def upload_step_file(file: UploadFile = File(...)):
     
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8002, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8002, reload=True)

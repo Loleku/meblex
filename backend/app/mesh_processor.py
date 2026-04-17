@@ -1,207 +1,160 @@
 """
-Module for processing 3D models (STEP files) and converting them to triangle meshes.
-Uses direct OpenCASCADE calls via ctypes or a fallback method.
+Module for processing STEP files and converting them to triangle meshes.
 """
 
-import numpy as np
-from typing import Dict, List, Tuple, Any
-import io
-import tempfile
+from typing import Any, Dict, List
 import os
+import sys
+import tempfile
+
+import numpy as np
 
 
-def generate_sample_mesh() -> Dict[str, Any]:
-    """
-    Generate a sample cube mesh for testing purposes.
-    This is a fallback when STEP processing is unavailable.
-    
-    Returns:
-        Dictionary with mesh data containing vertices, triangles, and bounds
-    """
-    # Create a simple cube mesh
-    vertices = [
-        # Bottom face (z=0)
-        [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
-        # Top face (z=1)
-        [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1],
-    ]
-    
-    triangles = [
-        # Bottom face
-        [0, 1, 2], [0, 2, 3],
-        # Top face
-        [4, 6, 5], [4, 7, 6],
-        # Front face
-        [0, 5, 1], [0, 4, 5],
-        # Back face
-        [2, 7, 3], [2, 6, 7],
-        # Left face
-        [0, 3, 7], [0, 7, 4],
-        # Right face
-        [1, 5, 6], [1, 6, 2],
-    ]
-    
+MeshResult = Dict[str, Any]
+
+
+def _build_mesh_result(vertices: List[List[float]], triangles: List[List[int]]) -> MeshResult:
+    if not vertices or not triangles:
+        raise RuntimeError("Meshing succeeded but produced empty geometry.")
+
     vertices_array = np.array(vertices, dtype=np.float32)
-    bounds = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
-    
+    bounds = [
+        float(vertices_array[:, 0].min()),
+        float(vertices_array[:, 1].min()),
+        float(vertices_array[:, 2].min()),
+        float(vertices_array[:, 0].max()),
+        float(vertices_array[:, 1].max()),
+        float(vertices_array[:, 2].max()),
+    ]
+
     return {
         "vertices": vertices,
         "triangles": triangles,
         "bounds": bounds,
         "vertex_count": len(vertices),
         "triangle_count": len(triangles),
-        "is_sample": True
     }
 
 
-def process_step_to_mesh(file_content: bytes, tolerance: float = 0.01) -> Dict[str, Any]:
+def _process_with_cadquery(file_content: bytes, tolerance: float) -> MeshResult:
+    import cadquery as cq
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepMesh import BRepMesh_IncrementalMesh
+    from OCP.TopAbs import TopAbs_FACE
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS
+
+    with tempfile.NamedTemporaryFile(suffix=".step", delete=False) as tmp:
+        tmp.write(file_content)
+        tmp_path = tmp.name
+
+    try:
+        shape = cq.importers.importStep(tmp_path)
+        ocp_shape = shape.val().wrapped
+
+        mesh_algo = BRepMesh_IncrementalMesh(ocp_shape, tolerance, False, 0.5, False)
+        mesh_algo.Perform()
+
+        vertices: List[List[float]] = []
+        triangles: List[List[int]] = []
+
+        face_explorer = TopExp_Explorer(ocp_shape, TopAbs_FACE)
+        from OCP.TopLoc import TopLoc_Location
+
+        location = TopLoc_Location()
+
+        while face_explorer.More():
+            face = TopoDS.Face_s(face_explorer.Current())
+            triangulation = BRep_Tool.Triangulation_s(face, location)
+
+            if triangulation is not None:
+                node_map: Dict[int, int] = {}
+
+                for i in range(1, triangulation.NbNodes() + 1):
+                    p = triangulation.Node(i)
+                    p_world = p.Transformed(location.Transformation())
+                    vertices.append([float(p_world.X()), float(p_world.Y()), float(p_world.Z())])
+                    node_map[i] = len(vertices) - 1
+
+                for i in range(1, triangulation.NbTriangles() + 1):
+                    tri = triangulation.Triangle(i)
+                    n1, n2, n3 = tri.Get()
+                    triangles.append([node_map[n1], node_map[n2], node_map[n3]])
+
+            face_explorer.Next()
+
+        return _build_mesh_result(vertices, triangles)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def _process_with_pyassimp(file_content: bytes) -> MeshResult:
+    import pyassimp
+
+    with tempfile.NamedTemporaryFile(suffix=".step", delete=False) as tmp:
+        tmp.write(file_content)
+        tmp_path = tmp.name
+
+    try:
+        scene = pyassimp.load(tmp_path)
+
+        vertices: List[List[float]] = []
+        triangles: List[List[int]] = []
+        vertex_offset = 0
+
+        for mesh in scene.meshes:
+            for vertex in mesh.vertices:
+                vertices.append([float(vertex[0]), float(vertex[1]), float(vertex[2])])
+
+            for face in mesh.faces:
+                if len(face) >= 3:
+                    triangles.append(
+                        [
+                            int(face[0]) + vertex_offset,
+                            int(face[1]) + vertex_offset,
+                            int(face[2]) + vertex_offset,
+                        ]
+                    )
+
+            vertex_offset += len(mesh.vertices)
+
+        return _build_mesh_result(vertices, triangles)
+    finally:
+        try:
+            pyassimp.release(scene)
+        except Exception:
+            pass
+
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def process_step_to_mesh(file_content: bytes, tolerance: float = 0.01) -> MeshResult:
     """
     Process a STEP file and convert it to a unified triangle mesh.
-    
-    Args:
-        file_content: Raw STEP file content as bytes
-        tolerance: Mesh refinement tolerance
-        
-    Returns:
-        Dictionary with mesh data containing:
-        - vertices: List of [x, y, z] coordinates
-        - triangles: List of [i, j, k] vertex indices
-        - bounds: Bounding box [min_x, min_y, min_z, max_x, max_y, max_z]
+
+    Raises RuntimeError when no processor can successfully parse the file.
     """
-    
-    # Try to use CadQuery if available
+
+    attempts: List[str] = []
+
     try:
-        import cadquery as cq
-        from OCP.BRepMesh import BRepMesh_IncrementalMesh
-        from OCP.Standard import Standard_True
-        from OCP.TopExp import TopExp
-        from OCP.TopAbs import TopAbs_FACE
-        
-        # Write to temporary file
-        with tempfile.NamedTemporaryFile(suffix='.step', delete=False) as tmp:
-            tmp.write(file_content)
-            tmp_path = tmp.name
-        
+        return _process_with_cadquery(file_content, tolerance)
+    except Exception as exc:
+        attempts.append(f"cadquery/OCP failed: {exc}")
+
+    if sys.version_info < (3, 12):
         try:
-            # Load using CadQuery
-            shape = cq.importers.importStep(tmp_path)
-            
-            # Mesh the shape
-            mesh_algo = BRepMesh_IncrementalMesh(shape.val(), tolerance, Standard_True)
-            mesh_algo.Perform()
-            
-            all_vertices = []
-            all_triangles = []
-            
-            # Extract triangles from each face
-            exp = TopExp()
-            for face in exp.MapShapesAndAncestors(shape.val(), TopAbs_FACE, TopAbs_FACE):
-                from OCP.Poly import Poly_Triangulation
-                
-                triangulation = Poly_Triangulation(face, False)
-                if triangulation is None:
-                    continue
-                    
-                # Extract vertices
-                nodes = triangulation.Nodes()
-                face_vertices = {}
-                for i in range(1, nodes.Length() + 1):
-                    node = nodes.Value(i)
-                    all_vertices.append([node.X(), node.Y(), node.Z()])
-                    face_vertices[i] = len(all_vertices) - 1
-                
-                # Extract triangles
-                triangles = triangulation.Triangles()
-                for i in range(1, triangles.Length() + 1):
-                    tri = triangles.Value(i)
-                    n1, n2, n3 = tri.Get()
-                    all_triangles.append([face_vertices[n1], face_vertices[n2], face_vertices[n3]])
-            
-            if all_vertices:
-                vertices_array = np.array(all_vertices, dtype=np.float32)
-                bounds = [
-                    float(vertices_array[:, 0].min()),
-                    float(vertices_array[:, 1].min()),
-                    float(vertices_array[:, 2].min()),
-                    float(vertices_array[:, 0].max()),
-                    float(vertices_array[:, 1].max()),
-                    float(vertices_array[:, 2].max()),
-                ]
-                
-                return {
-                    "vertices": all_vertices,
-                    "triangles": all_triangles,
-                    "bounds": bounds,
-                    "vertex_count": len(all_vertices),
-                    "triangle_count": len(all_triangles)
-                }
-                
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-                
-    except Exception as e:
-        print(f"CadQuery processing failed: {e}")
-    
-    # Fallback: Try using AssImp if available
-    try:
-        import assimp
-        
-        # Write to temporary file
-        with tempfile.NamedTemporaryFile(suffix='.step', delete=False) as tmp:
-            tmp.write(file_content)
-            tmp_path = tmp.name
-        
-        try:
-            scene = assimp.load(tmp_path)
-            
-            all_vertices = []
-            all_triangles = []
-            vertex_offset = 0
-            
-            for mesh in scene.meshes:
-                # Add vertices
-                for vertex in mesh.vertices:
-                    all_vertices.append(vertex.tolist())
-                
-                # Add triangles
-                for face in mesh.faces:
-                    if len(face) >= 3:
-                        all_triangles.append([
-                            face[0] + vertex_offset,
-                            face[1] + vertex_offset,
-                            face[2] + vertex_offset
-                        ])
-                
-                vertex_offset += len(mesh.vertices)
-            
-            if all_vertices:
-                vertices_array = np.array(all_vertices, dtype=np.float32)
-                bounds = [
-                    float(vertices_array[:, 0].min()),
-                    float(vertices_array[:, 1].min()),
-                    float(vertices_array[:, 2].min()),
-                    float(vertices_array[:, 0].max()),
-                    float(vertices_array[:, 1].max()),
-                    float(vertices_array[:, 2].max()),
-                ]
-                
-                return {
-                    "vertices": all_vertices,
-                    "triangles": all_triangles,
-                    "bounds": bounds,
-                    "vertex_count": len(all_vertices),
-                    "triangle_count": len(all_triangles)
-                }
-                
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-                
-    except Exception as e:
-        print(f"AssImp processing failed: {e}")
-    
-    # Fallback: Return a sample mesh and note that STEP processing is unavailable
-    result = generate_sample_mesh()
-    result["warning"] = "Could not process STEP file. Returning sample cube mesh. Install CadQuery with OCP support."
-    return result
+            return _process_with_pyassimp(file_content)
+        except Exception as exc:
+            attempts.append(f"pyassimp failed: {exc}")
+    else:
+        attempts.append("pyassimp skipped on Python 3.12+ (distutils was removed)")
+
+    details = " | ".join(attempts) if attempts else "No processors were attempted."
+    raise RuntimeError(
+        "STEP processing is unavailable or failed for this file. "
+        "Install compatible CAD dependencies (recommended Python 3.11/3.12 with cadquery and cadquery-ocp). "
+        f"Details: {details}"
+    )
