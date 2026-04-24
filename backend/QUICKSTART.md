@@ -59,10 +59,35 @@ SSE progress stream:
 curl -N "http://localhost:8002/api/step/upload/<job_id>/events"
 ```
 
+### 4c) Parts 2D async endpoint
+
+Start parts job:
+
+```bash
+curl -X POST "http://localhost:8002/api/step/parts-2d?tolerance=0.02" \
+  -F "file=@your_model.step"
+```
+
+Check parts status:
+
+```bash
+curl "http://localhost:8002/api/step/parts-2d/<job_id>"
+```
+
+Parts SSE stream:
+
+```bash
+curl -N "http://localhost:8002/api/step/parts-2d/<job_id>/events"
+```
+
 ### 5) Optional smoke test
 
 ```bash
 python test_mesh.py C:/path/to/your_model.step --tolerance 0.02
+```
+
+```bash
+python test_parts_2d.py C:/path/to/your_model.step --tolerance 0.02
 ```
 
 ## Tolerance tips

@@ -139,12 +139,58 @@ source.addEventListener("failed", (event) => {
 });
 ```
 
+### POST `/api/step/parts-2d` (async parts extraction + SVG)
+
+Starts background processing for STEP solids extraction, part classification,
+and 2D isometric SVG generation.
+
+Form data:
+- `file` (required): `.step` or `.stp`
+
+Query params:
+- `tolerance` (optional, float, default `0.01`, range `0.001..1.0`)
+
+Response (`202 Accepted`):
+
+```json
+{
+  "success": true,
+  "job_id": "uuid",
+  "status": "queued",
+  "status_url": "/api/step/parts-2d/{job_id}",
+  "events_url": "/api/step/parts-2d/{job_id}/events"
+}
+```
+
+### GET `/api/step/parts-2d/{job_id}`
+
+Returns parts-2d job status (`queued`, `processing`, `completed`, `failed`) and progress.
+When completed, `result` includes:
+- extracted solids metadata
+- category classification (`panel`, `connector`, `other`)
+- grouped 2D part drawings (`parts_2d`) with one SVG per group and `quantity`
+- grouping by dimensions + volume with relative tolerance `15%`
+
+### GET `/api/step/parts-2d/{job_id}/events`
+
+SSE stream for parts-2d processing with events:
+- `queued`
+- `progress`
+- `completed`
+- `failed`
+
 ## Smoke test script
 
 You can test meshing directly:
 
 ```bash
 python test_mesh.py C:/path/to/model.step --tolerance 0.02
+```
+
+Parts 2D smoke test:
+
+```bash
+python test_parts_2d.py C:/path/to/model.step --tolerance 0.02
 ```
 
 ## Notes about vertex count
