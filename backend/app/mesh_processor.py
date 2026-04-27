@@ -6,11 +6,39 @@ from typing import Any, Dict, List
 import os
 import sys
 import tempfile
+import logging
+from contextlib import contextmanager
 
 import numpy as np
 
+logger = logging.getLogger(__name__)
 
 MeshResult = Dict[str, Any]
+
+
+@contextmanager
+def temp_step_file(file_content: bytes):
+    """Context manager for temporary STEP files - ensures cleanup."""
+    tmp_file = None
+    try:
+        tmp_file = tempfile.NamedTemporaryFile(suffix=".step", delete=False)
+        tmp_file.write(file_content)
+        tmp_file.flush()
+        tmp_path = tmp_file.name
+        tmp_file.close()
+        yield tmp_path
+    finally:
+        if tmp_file:
+            try:
+                tmp_file.close()
+            except Exception:
+                pass
+        
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError as e:
+                logger.warning(f"Failed to delete temporary STEP file {tmp_path}: {e}")
 
 
 def _compute_vertex_normals(vertices_array: np.ndarray, triangles_array: np.ndarray) -> np.ndarray:
@@ -86,11 +114,7 @@ def _process_with_cadquery(file_content: bytes, tolerance: float) -> MeshResult:
     from OCP.TopExp import TopExp_Explorer
     from OCP.TopoDS import TopoDS
 
-    with tempfile.NamedTemporaryFile(suffix=".step", delete=False) as tmp:
-        tmp.write(file_content)
-        tmp_path = tmp.name
-
-    try:
+    with temp_step_file(file_content) as tmp_path:
         shape = cq.importers.importStep(tmp_path)
         ocp_shape = shape.val().wrapped
 
@@ -126,50 +150,41 @@ def _process_with_cadquery(file_content: bytes, tolerance: float) -> MeshResult:
             face_explorer.Next()
 
         return _build_mesh_result(vertices, triangles)
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
 
 
 def _process_with_pyassimp(file_content: bytes) -> MeshResult:
     import pyassimp
 
-    with tempfile.NamedTemporaryFile(suffix=".step", delete=False) as tmp:
-        tmp.write(file_content)
-        tmp_path = tmp.name
-
-    try:
+    with temp_step_file(file_content) as tmp_path:
         scene = pyassimp.load(tmp_path)
 
-        vertices: List[List[float]] = []
-        triangles: List[List[int]] = []
-        vertex_offset = 0
-
-        for mesh in scene.meshes:
-            for vertex in mesh.vertices:
-                vertices.append([float(vertex[0]), float(vertex[1]), float(vertex[2])])
-
-            for face in mesh.faces:
-                if len(face) >= 3:
-                    triangles.append(
-                        [
-                            int(face[0]) + vertex_offset,
-                            int(face[1]) + vertex_offset,
-                            int(face[2]) + vertex_offset,
-                        ]
-                    )
-
-            vertex_offset += len(mesh.vertices)
-
-        return _build_mesh_result(vertices, triangles)
-    finally:
         try:
-            pyassimp.release(scene)
-        except Exception:
-            pass
+            vertices: List[List[float]] = []
+            triangles: List[List[int]] = []
+            vertex_offset = 0
 
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+            for mesh in scene.meshes:
+                for vertex in mesh.vertices:
+                    vertices.append([float(vertex[0]), float(vertex[1]), float(vertex[2])])
+
+                for face in mesh.faces:
+                    if len(face) >= 3:
+                        triangles.append(
+                            [
+                                int(face[0]) + vertex_offset,
+                                int(face[1]) + vertex_offset,
+                                int(face[2]) + vertex_offset,
+                            ]
+                        )
+
+                vertex_offset += len(mesh.vertices)
+
+            return _build_mesh_result(vertices, triangles)
+        finally:
+            try:
+                pyassimp.release(scene)
+            except Exception:
+                pass
 
 
 def process_step_to_mesh(file_content: bytes, tolerance: float = 0.01) -> MeshResult:

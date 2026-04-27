@@ -4,3 +4,6 @@ numpy
 python-multipart
 cadquery
 cadquery-ocp
+requests
+python-dotenv
+reportlab

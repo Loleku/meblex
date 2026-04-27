@@ -139,12 +139,143 @@ source.addEventListener("failed", (event) => {
 });
 ```
 
+### POST `/api/step/parts-2d` (async parts extraction + SVG)
+
+Starts background processing for STEP solids extraction, part classification,
+and 2D isometric SVG generation.
+
+Form data:
+- `file` (required): `.step` or `.stp`
+
+Query params:
+- `tolerance` (optional, float, default `0.01`, range `0.001..1.0`)
+
+Response (`202 Accepted`):
+
+```json
+{
+  "success": true,
+  "job_id": "uuid",
+  "status": "queued",
+  "status_url": "/api/step/parts-2d/{job_id}",
+  "events_url": "/api/step/parts-2d/{job_id}/events"
+}
+```
+
+### GET `/api/step/parts-2d/{job_id}`
+
+Returns parts-2d job status (`queued`, `processing`, `completed`, `failed`) and progress.
+When completed, `result` includes:
+- extracted solids metadata
+- category classification (`panel`, `connector`, `other`)
+- grouped 2D part drawings (`parts_2d`) with one SVG per group and `quantity`
+- grouping by dimensions + volume with relative tolerance `15%`
+
+### GET `/api/step/parts-2d/{job_id}/events`
+
+SSE stream for parts-2d processing with events:
+- `queued`
+- `progress`
+- `completed`
+- `failed`
+
+### POST `/api/step/assembly-analysis` (async assembly instructions generation)
+
+Starts background processing for assembly instruction generation from STEP file.
+Extracts parts, classifies them, and generates step-by-step assembly sequence.
+Uses AI (OpenRouter) to analyze geometry and generate instructions, or fallback
+to heuristic-based sequence if AI is unavailable.
+
+Form data:
+- `file` (required): `.step` or `.stp`
+
+Query params:
+- `tolerance` (optional, float, default `0.01`, range `0.001..1.0`)
+- `preview_only` (optional, bool, default `false`)
+  - `true`: quick preview SVG without AI analysis
+  - `false`: full assembly step generation with AI
+- `model` (optional, string, default `"openrouter/auto"`)
+  - OpenRouter model ID for AI analysis (requires OPENROUTER_API_KEY in .env)
+
+Response (`202 Accepted`):
+
+```json
+{
+  "success": true,
+  "job_id": "uuid",
+  "status": "queued",
+  "status_url": "/api/step/assembly-analysis/{job_id}",
+  "events_url": "/api/step/assembly-analysis/{job_id}/events"
+}
+```
+
+### GET `/api/step/assembly-analysis/{job_id}`
+
+Returns assembly analysis job status and progress.
+When completed, `result` includes:
+- `mode`: `"preview_only"` or `"full_analysis"`
+- `parts_2d`: extracted and grouped parts with 2D SVGs
+- `assembly_steps`: array of assembly instructions
+- `model_preview_svg`: quick preview of assembled model
+- `stats`: analysis statistics
+
+Assembly step structure:
+
+```json
+{
+  "stepNumber": 1,
+  "title": "Mount side panel",
+  "description": "Connect left side panel (A) to frame using connectors",
+  "partIndices": [0, 5],
+  "partRoles": {"0": "side panel", "5": "connector"},
+  "contextPartIndices": [],
+  "exploded_svg": "<svg>...</svg>",
+  "visual_assets": {
+    "exploded_view": true,
+    "context_parts_visible": false
+  }
+}
+```
+
+### GET `/api/step/assembly-analysis/{job_id}/events`
+
+SSE stream for assembly analysis with events:
+- `queued`
+- `progress`
+- `completed`
+- `failed`
+
+
 ## Smoke test script
 
 You can test meshing directly:
 
 ```bash
 python test_mesh.py C:/path/to/model.step --tolerance 0.02
+```
+
+Parts 2D smoke test:
+
+```bash
+python test_parts_2d.py C:/path/to/model.step --tolerance 0.02
+```
+
+Assembly analysis smoke test:
+
+```bash
+python test_assembly_analysis.py C:/path/to/model.step --tolerance 0.02
+```
+
+With AI analysis (requires OPENROUTER_API_KEY in .env):
+
+```bash
+python test_assembly_analysis.py C:/path/to/model.step --tolerance 0.02 --model "openrouter/auto"
+```
+
+Preview mode only:
+
+```bash
+python test_assembly_analysis.py C:/path/to/model.step --tolerance 0.02 --preview-only
 ```
 
 ## Notes about vertex count

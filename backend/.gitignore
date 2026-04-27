@@ -26,3 +26,11 @@ archive.zip
 .cache
 
 .codspeed
+
+# Environment variables and secrets
+.env
+.env.local
+.env.*.local
+
+# Test output files
+test_result*.json
